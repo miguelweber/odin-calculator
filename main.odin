@@ -6,10 +6,8 @@ import "core:fmt"
 import "core:os"
 
 /* Intended Grammar:
- *  S ::= expression
+ *  S ::= addition
  *      | ''
- *
- *  expression ::= addition
  *
  *  addition ::= multiplication (('+'|'-') multiplication)*
  *
@@ -17,7 +15,7 @@ import "core:os"
  *
  *  unary ::= ('+'|'-')* atom
  *
- *  atom ::= '(' expression ')'
+ *  atom ::= '(' addition ')'
  *         | number
  *
  */
@@ -31,6 +29,7 @@ Operator :: enum byte {
 	Subtraction,
 }
 
+// TODO use floats instead.
 Node :: struct {
 	operator: Operator,
 	left:     ^Node,
@@ -54,23 +53,54 @@ Token :: struct {
 	number: i64,
 }
 
+main :: proc() {
+	r: bufio.Reader
+	bufio.reader_init(&r, os.to_reader(os.stdin))
+	defer bufio.reader_destroy(&r)
+	for {
+		defer free_all(context.temp_allocator)
+		fmt.print("> ")
+		// TODO Proper error handling:
+		// remove all or_break/or_continue
+		line := bufio.reader_read_string(&r, '\n') or_break
+		tokens := lex(line) or_break
+		if len(tokens) == 0 {
+			continue
+		}
+		ast := parse(tokens[:]) or_break
+		result := compute(ast)
+		fmt.println(result)
+	}
+}
+
 // n.b. uses context.temp_allocator
 // Caller must handle empty tokens.
 parse :: proc(tokens: []Token) -> (ast: ^Node, ok: bool) {
 	ts := Token_Stream{tokens=tokens}
-	ast = parse_addition(&ts) or_return
-	if current(&ts) != {} {return nil, false}
-	return
+	ast, ok = parse_addition(&ts)
+	if !ok || current(&ts) != {} {
+		return nil, false
+	}
+	return ast, true
 	// NOTE: Odin errors on `if current(&ts) != Token{}` saying
 	// the rhs is not an expression, but a type. Compiler error?
 
 	parse_addition :: proc(ts: ^Token_Stream) -> (ast: ^Node, ok: bool) {
-		ast = parse_multiplication(ts) or_return
+		ast, ok = parse_multiplication(ts)
+		if !ok {
+			return nil, false
+		}
 		for {
 			tok := current(ts).type
-			if tok != .Plus && tok != .Minus {break}
+			if tok != .Plus && tok != .Minus {
+				break
+			}
+			advance(ts)
 
-			rhs := parse_multiplication(ts) or_return
+			rhs, ok := parse_multiplication(ts)
+			if !ok {
+				return nil, false
+			}
 			lhs := ast
 			ast = new_clone(Node{
 				operator = binop_from_token(tok),
@@ -81,12 +111,19 @@ parse :: proc(tokens: []Token) -> (ast: ^Node, ok: bool) {
 		return ast, true
 	}
 	parse_multiplication :: proc(ts: ^Token_Stream) -> (ast: ^Node, ok: bool) {
-		ast = parse_unary(ts) or_return
+		ast, ok = parse_unary(ts)
+		if !ok {
+			return nil, false
+		}
 		for {
 			tok := current(ts).type
 			if tok != .Star && tok != .Slash {break}
+			advance(ts)
 
-			rhs := parse_unary(ts) or_return
+			rhs, ok := parse_unary(ts)
+			if !ok {
+				return nil, false
+			}
 			lhs := ast
 			ast = new_clone(Node{
 				operator = binop_from_token(tok),
@@ -98,39 +135,41 @@ parse :: proc(tokens: []Token) -> (ast: ^Node, ok: bool) {
 	}
 	parse_unary :: proc(ts: ^Token_Stream) -> (ast: ^Node, ok: bool) {
 		minus_cnt: u32 = 0
-		// NOTE:
-		// The plan is to emit at max one negation node:
-		// the number of `-` is tracked; if it is even, then
-		// it is a no-op and only the atom node is emited;
-		// if, however, it is odd, then the atom node is wrapped
-		// by exactly one negation node. TODO number optimization
-		// Also, `+` are no-ops.
-		for {
+		loop: for {
 			#partial switch op := current(ts); op.type {
-			case:        break
+			case:        break loop
 			case .Plus:  ;
 			case .Minus: minus_cnt += 1
 			}
 			advance(ts)
 		}
-		is_negative := minus_cnt % 2 != 0
+		is_negative := (minus_cnt % 2) != 0
 
-		value: Node
 		#partial switch tok := current(ts); tok.type {
 		case:
-			ok = false
-			value = {}
+			return nil, false
 		case .Number:
-			ok = true
 			number := -tok.number if is_negative else tok.number
-			value = {
+			ast = new_clone(Node{
 				operator = .None,
 				number = number
+			})
+		case .L_Paren:
+			advance(ts)
+			ast, ok = parse_addition(ts)
+			if current(ts).type != .R_Paren {
+				return nil, false
 			}
-		// TODO: no parentheses for now
+			if is_negative {
+				inner := ast
+				ast = new_clone(Node{
+					operator = .Negation,
+					left = inner
+				}, context.temp_allocator)
+			}
 		}
-		ast = new_clone(value, context.temp_allocator)
-		return
+		advance(ts)
+		return ast, true
 	}
 
 	binop_from_token :: proc(t: Token_Type) -> Operator {
@@ -140,7 +179,8 @@ parse :: proc(tokens: []Token) -> (ast: ^Node, ok: bool) {
 			.Plus = .Addition,
 			.Minus = .Subtraction,
 		}
-		return table[t]
+		value := table[t]
+		return value
 	}
 
 	Token_Stream :: struct {
@@ -148,7 +188,8 @@ parse :: proc(tokens: []Token) -> (ast: ^Node, ok: bool) {
 		idx:    int,
 	}
 	current :: proc(ts: ^Token_Stream) -> Token {
-		return ts.tokens[ts.idx] if ts.idx < len(ts.tokens) else Token{}
+		value := ts.tokens[ts.idx] if ts.idx < len(ts.tokens) else Token{}
+		return value
 	}
 	advance :: proc(ts: ^Token_Stream) {
 		ts.idx = min(ts.idx + 1, len(ts.tokens))
@@ -162,8 +203,9 @@ lex :: proc(line: string) -> (tokens: [dynamic]Token, ok: bool) {
 	digits := make([dynamic]u8, context.temp_allocator)
 	state: State = .Free
 	for c in line {
+		// TODO remove all or_return/or_continue
 		switch c {
-		case ' ', '\t', '\n':
+		case ' ', '\t', '\n', '\r':
 			switch state {
 			case .In_Number:
 				emit_number_token(digits[:], &tokens) or_return
@@ -196,8 +238,7 @@ lex :: proc(line: string) -> (tokens: [dynamic]Token, ok: bool) {
 	if len(digits) > 0 {
 		emit_number_token(digits[:], &tokens) or_return
 	}
-	ok = true
-	return
+	return tokens, true
 
 
 	State :: enum byte {In_Number, Free}
@@ -233,7 +274,9 @@ lex :: proc(line: string) -> (tokens: [dynamic]Token, ok: bool) {
 }
 
 compute :: proc(node: ^Node) -> i64 {
-	if node == nil {return 0}
+	if node == nil {
+		return 0
+	}
 
 	lhs := compute(node.left)
 	rhs := compute(node.right)
@@ -253,20 +296,4 @@ compute :: proc(node: ^Node) -> i64 {
 		value = lhs - rhs
 	}
 	return value
-}
-
-main :: proc() {
-	r: bufio.Reader
-	bufio.reader_init(&r, os.to_reader(os.stdin))
-	defer bufio.reader_destroy(&r)
-	for {
-		defer free_all(context.temp_allocator)
-		fmt.print("> ")
-		line := bufio.reader_read_string(&r, '\n') or_break
-		tokens := lex(line) or_break
-		if len(tokens) == 0 {continue}
-		ast := parse(tokens[:]) or_break
-		result := compute(ast)
-		fmt.println(result)
-	}
 }
