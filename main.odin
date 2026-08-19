@@ -5,20 +5,19 @@ import "core:bufio"
 import "core:fmt"
 import "core:os"
 
-/* Intended Grammar:
- *  S ::= addition
- *      | ''
- *
- *  addition ::= multiplication (('+'|'-') multiplication)*
- *
- *  multiplication ::= unary (('*'|'/') unary)*
- *
- *  unary ::= ('+'|'-')* atom
- *
- *  atom ::= '(' addition ')'
- *         | number
- *
- */
+// -- Intended grammar, in an ad-hoc PEG dialect
+//
+// expr = addition?
+//
+// addition = multiplication ([+-] multiplication)*
+//
+// multiplication = unary ([*/] unary)*
+//
+// unary = [+-]* atom
+//
+// atom = '(' addition ')'
+//      | NUMBER
+//
 
 Operator :: enum byte {
 	None,
